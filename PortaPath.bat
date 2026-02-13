@@ -7,7 +7,7 @@ exit /b
 #>
 
 # ==============================================================================
-#  PORTABLE USER ENVIRONMENT MANAGER (PortaPath) BY https://github.com/MohaKalaf
+#  PORTABLE USER ENVIRONMENT MANAGER (PortaPath) BY https://github.com/MohaKalaf 
 # ==============================================================================
 
 # -- UI INJECTION --
@@ -74,7 +74,11 @@ function Get-DefaultConfig { return @() }
 
 function Load-Config {
     if (Test-Path $configFile) {
-        try { return Get-Content $configFile -Raw | ConvertFrom-Json } 
+        try { 
+            $raw = Get-Content $configFile -Raw | ConvertFrom-Json 
+            # Self-Healing: Filter out nulls
+            return @($raw) | Where-Object { $_ -ne $null -and $_.Label }
+        } 
         catch { return Get-DefaultConfig }
     }
     return Get-DefaultConfig
@@ -100,9 +104,13 @@ function Save-Config {
             }
         }
     }
-    # Force array wrapper even if list is empty or has only 1 item
-    $json = ConvertTo-Json -InputObject @($list) -Depth 10
-    Set-Content -Path $configFile -Value $json -Encoding UTF8
+    
+    if ($list.Count -eq 0) {
+        Set-Content -Path $configFile -Value "[]" -Encoding UTF8
+    } else {
+        $json = ConvertTo-Json -InputObject @($list) -Depth 10
+        Set-Content -Path $configFile -Value $json -Encoding UTF8
+    }
 }
 
 
@@ -275,13 +283,13 @@ $grid.Add_CellEndEdit({
 
 # -- BUTTON CLICK LISTENERS --
 $btnAdd.Add_Click({ 
-    [void]$grid.Rows.Add($phName, $phPath, $phVar) # FIX: SILENCED
+    [void]$grid.Rows.Add($phName, $phPath, $phVar)
     Check-EmptyState
 })
 
 $btnRem.Add_Click({ 
     if ($grid.SelectedRows.Count -gt 0) { 
-        [void]$grid.Rows.Remove($grid.SelectedRows[0]) # FIX: SILENCED
+        [void]$grid.Rows.Remove($grid.SelectedRows[0])
     }
     Check-EmptyState
 })
@@ -332,7 +340,7 @@ function Update-Layout {
     $lblEmpty.Location = New-Object System.Drawing.Point(32, 116)
     $lblEmpty.Size = New-Object System.Drawing.Size(($w - 84), ($gridHeight - 38))
 }
-[void]$form.Add_Resize({ Update-Layout }) # FIX: SILENCED
+[void]$form.Add_Resize({ Update-Layout })
 
 function Resolve-PathInput($inputPath) {
     if ([string]::IsNullOrWhiteSpace($inputPath)) { return "" }
@@ -361,7 +369,9 @@ $btnActivate.Add_Click({
     Save-Config
     $User = [EnvironmentVariableTarget]::User
     $CurrentPath = [Environment]::GetEnvironmentVariable('Path', $User)
+    $CurrentPathParts = $CurrentPath -split ";" | Where-Object { $_.Trim() -ne "" }
     $NewPathEntries = @()
+    $IsModified = $false
 
     foreach ($row in $grid.Rows) {
         if (-not $row.IsNewRow) {
@@ -370,23 +380,34 @@ $btnActivate.Add_Click({
             $fullPath = Resolve-PathInput $rawPath
             
             if ($fullPath -ne "" -and $rawPath -ne $phPath) {
+                
+                # Smart Env Var (Check before set)
                 if (-not [string]::IsNullOrWhiteSpace($envVar) -and $envVar -ne $phVar) {
-                    [Environment]::SetEnvironmentVariable($envVar, $fullPath, $User)
+                    $existing = [Environment]::GetEnvironmentVariable($envVar, $User)
+                    if ($existing -ne $fullPath) {
+                        [Environment]::SetEnvironmentVariable($envVar, $fullPath, $User)
+                    }
                 }
-                if (Test-Path "$fullPath\bin") {
-                    $NewPathEntries += "$fullPath\bin"
-                } else {
-                    $NewPathEntries += $fullPath
+                
+                # Smart Path (Check before queue)
+                $targetPath = if (Test-Path "$fullPath\bin") { "$fullPath\bin" } else { $fullPath }
+                
+                if ($CurrentPathParts -notcontains $targetPath) {
+                    $NewPathEntries += $targetPath
+                    $IsModified = $true
                 }
             }
         }
     }
     
-    $NewPathString = ($NewPathEntries -join ";") + ";" + $CurrentPath
-    [Environment]::SetEnvironmentVariable('Path', $NewPathString, $User)
-    [Environment]::SetEnvironmentVariable('PORTAPATH_ACTIVE', "1", $User)
+    if ($IsModified) {
+        $NewPathString = ($NewPathEntries -join ";") + ";" + $CurrentPath
+        [Environment]::SetEnvironmentVariable('Path', $NewPathString, $User)
+        [Environment]::SetEnvironmentVariable('PORTAPATH_ACTIVE', "1", $User)
+    } else {
+        [Environment]::SetEnvironmentVariable('PORTAPATH_ACTIVE', "1", $User)
+    }
     
-    Start-Process -NoNewWindow -FilePath "setx" -ArgumentList "PORTAPATH_REFRESH", "1"
     [System.Windows.Forms.MessageBox]::Show("Activated!", "Success")
     Update-Status
 })
@@ -394,20 +415,66 @@ $btnActivate.Add_Click({
 $btnDeactivate.Add_Click({
     $User = [EnvironmentVariableTarget]::User
     $CurrentPath = [Environment]::GetEnvironmentVariable('Path', $User)
-    $parts = $CurrentPath -split ";"
-    $cleanParts = $parts | Where-Object { $_ -notlike "$script:driveRoot*" }
-    $NewPath = $cleanParts -join ";"
-    [Environment]::SetEnvironmentVariable('Path', $NewPath, $User)
     
+    # 1. PREPARE PATH LIST
+    [System.Collections.Generic.List[string]]$PathList = $CurrentPath -split ";" | Where-Object { $_.Trim() -ne "" }
+
+    # 2. SURGICAL REMOVAL (Known Grid Items)
     foreach ($row in $grid.Rows) {
-        $v = $row.Cells[2].Value
-        if (-not [string]::IsNullOrWhiteSpace($v) -and $v -ne $phVar) {
-            [Environment]::SetEnvironmentVariable($v, $null, $User)
+        if (-not $row.IsNewRow) {
+            $rawPath = $row.Cells[1].Value
+            $envVar  = $row.Cells[2].Value
+            $fullPath = Resolve-PathInput $rawPath
+
+            if ($fullPath -ne "") {
+                # Remove ENV
+                if (-not [string]::IsNullOrWhiteSpace($envVar) -and $envVar -ne $phVar) {
+                    if ([Environment]::GetEnvironmentVariable($envVar, $User) -ne $null) {
+                        [Environment]::SetEnvironmentVariable($envVar, $null, $User)
+                    }
+                }
+                # Remove PATH
+                $targetBin = "$fullPath\bin"
+                $targetRoot = $fullPath
+                if ($PathList.Contains($targetBin)) { [void]$PathList.Remove($targetBin) }
+                if ($PathList.Contains($targetRoot)) { [void]$PathList.Remove($targetRoot) }
+            }
         }
     }
+
+    # 3. ORPHAN CHECK (Interactive)
+    $Orphans = @()
+    foreach ($p in $PathList) {
+        # Identify paths belonging to THIS drive that are still lingering
+        if ($p.StartsWith($script:driveRoot)) {
+            $Orphans += $p
+        }
+    }
+
+    if ($Orphans.Count -gt 0) {
+        $msg = "Found $($Orphans.Count) path(s) on this drive that are NOT in your config:`n`n"
+        $limit = 0
+        foreach ($o in $Orphans) {
+            if ($limit -lt 10) { $msg += "$o`n" }
+            $limit++
+        }
+        if ($Orphans.Count -gt 10) { $msg += "...and $($Orphans.Count - 10) more.`n" }
+        $msg += "`nThese might be old tools you removed from the list.`nDo you want to remove them?"
+
+        $result = [System.Windows.Forms.MessageBox]::Show($msg, "Orphaned Paths Detected", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+
+        if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+            foreach ($o in $Orphans) {
+                [void]$PathList.Remove($o)
+            }
+        }
+    }
+
+    # 4. COMMIT
+    $NewPath = $PathList -join ";"
+    [Environment]::SetEnvironmentVariable('Path', $NewPath, $User)
     [Environment]::SetEnvironmentVariable('PORTAPATH_ACTIVE', $null, $User)
 
-    Start-Process -NoNewWindow -FilePath "setx" -ArgumentList "PORTAPATH_REFRESH", "0"
     [System.Windows.Forms.MessageBox]::Show("Deactivated.", "Success")
     Update-Status
 })
@@ -422,7 +489,7 @@ if ($initialData.Count -eq 0) {
         $n = if ($item.Label) { $item.Label } else { $phName }
         $p = if ($item.Path)  { $item.Path }  else { $phPath }
         $v = if ($item.EnvVar){ $item.EnvVar } else { $phVar }
-        [void]$grid.Rows.Add($n, $p, $v) # FIX: SILENCED
+        [void]$grid.Rows.Add($n, $p, $v) 
     }
 }
 
