@@ -57,7 +57,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 
--- HELPER FUNCTIONS --
+# -- HELPER FUNCTIONS --
 # Helper to force REG_EXPAND_SZ if value contains % variables
 function Set-RegistryEnv($name, $value) {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
@@ -520,3 +520,4 @@ Update-Status
 $grid.ClearSelection()
 
 try { $form.ShowDialog() } catch {}
+
