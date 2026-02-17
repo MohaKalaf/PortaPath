@@ -57,6 +57,18 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 
+-- HELPER FUNCTIONS --
+# Helper to force REG_EXPAND_SZ if value contains % variables
+function Set-RegistryEnv($name, $value) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    if ($value -match "%") {
+        $key.SetValue($name, $value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    } else {
+        $key.SetValue($name, $value, [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    $key.Close()
+}
+
 # --- CONSTANTS ---
 $script:scriptPath = (Get-Location).Path
 $script:driveRoot = (Get-PSDrive -Name (Get-Location).Drive.Name).Root.TrimEnd('\')
@@ -345,6 +357,10 @@ function Update-Layout {
 function Resolve-PathInput($inputPath) {
     if ([string]::IsNullOrWhiteSpace($inputPath)) { return "" }
     if ($inputPath -eq $phPath) { return "" }
+    
+    # If it starts with %, return it exactly as-is (Raw Mode)
+    if ($inputPath.StartsWith("%")) { return $inputPath }
+    
     if ($inputPath -match "^[a-zA-Z]:") { return $inputPath }
     return "$script:driveRoot\$inputPath"
 }
@@ -381,16 +397,17 @@ $btnActivate.Add_Click({
             
             if ($fullPath -ne "" -and $rawPath -ne $phPath) {
                 
-                # Smart Env Var (Check before set)
+                # Smart Env Var
                 if (-not [string]::IsNullOrWhiteSpace($envVar) -and $envVar -ne $phVar) {
                     $existing = [Environment]::GetEnvironmentVariable($envVar, $User)
                     if ($existing -ne $fullPath) {
-                        [Environment]::SetEnvironmentVariable($envVar, $fullPath, $User)
+                        # Use Registry helper to support %Variables%
+                        Set-RegistryEnv $envVar $fullPath
                     }
                 }
                 
-                # Smart Path (Check before queue)
-                $targetPath = if (Test-Path "$fullPath\bin") { "$fullPath\bin" } else { $fullPath }
+                # Pure Path
+                $targetPath = $fullPath
                 
                 if ($CurrentPathParts -notcontains $targetPath) {
                     $NewPathEntries += $targetPath
@@ -402,7 +419,10 @@ $btnActivate.Add_Click({
     
     if ($IsModified) {
         $NewPathString = ($NewPathEntries -join ";") + ";" + $CurrentPath
-        [Environment]::SetEnvironmentVariable('Path', $NewPathString, $User)
+        # FIX: Use Registry helper for PATH to ensure expansion works
+        Set-RegistryEnv 'Path' $NewPathString
+        
+        # Trigger Broadcast
         [Environment]::SetEnvironmentVariable('PORTAPATH_ACTIVE', "1", $User)
     } else {
         [Environment]::SetEnvironmentVariable('PORTAPATH_ACTIVE', "1", $User)

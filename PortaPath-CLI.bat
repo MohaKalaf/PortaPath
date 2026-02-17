@@ -40,8 +40,21 @@ function Save-Config ($data) {
 
 function Resolve-PathInput($inputPath) {
     if ([string]::IsNullOrWhiteSpace($inputPath)) { return "" }
+    # FIX: If it starts with %, return it exactly as-is
+    if ($inputPath.StartsWith("%")) { return $inputPath }
     if ($inputPath -match "^[a-zA-Z]:") { return $inputPath }
     return "$driveRoot\$inputPath"
+}
+
+# Helper to force REG_EXPAND_SZ if value contains % variables
+function Set-RegistryEnv($name, $value) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    if ($value -match "%") {
+        $key.SetValue($name, $value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    } else {
+        $key.SetValue($name, $value, [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    $key.Close()
 }
 
 # 2. ACTIONS
@@ -126,7 +139,8 @@ function Action-Activate {
             }
 
             $needsPathUpdate = $false
-            $targetPath = if (Test-Path "$fullPath\bin") { "$fullPath\bin" } else { $fullPath }
+            $targetPath = $fullPath
+            
             if ($CurrentPathParts -notcontains $targetPath) { $needsPathUpdate = $true }
 
             # --- OUTPUT LOGIC ---
@@ -136,7 +150,8 @@ function Action-Activate {
                 Write-Host "  + $($item.Label)" -ForegroundColor White
 
                 if ($needsEnvUpdate) {
-                    [Environment]::SetEnvironmentVariable($item.EnvVar, $fullPath, $User)
+                    # FIX: Use Registry helper
+                    Set-RegistryEnv $item.EnvVar $fullPath
                     Write-Host "    + ENV: Setting $($item.EnvVar)" -ForegroundColor Green
                 }
 
@@ -151,7 +166,10 @@ function Action-Activate {
     
     if ($IsPathModified) {
         $FinalPathString = ($NewPathParts -join ";") + ";" + $CurrentPathStr
-        [Environment]::SetEnvironmentVariable('Path', $FinalPathString, $User)
+        # FIX: Use Registry helper
+        Set-RegistryEnv 'Path' $FinalPathString
+        
+        # Trigger Broadcast
         [Environment]::SetEnvironmentVariable('PORTAPATH_ACTIVE', "1", $User)
         Write-Host "`nSUCCESS: New paths injected." -ForegroundColor Green
     } else {
